@@ -1,0 +1,53 @@
+﻿/*@!Encoding:65001*/
+/* ECU1 with CAN ID 0x123 */
+
+includes
+{
+  #include "CANTP.can"
+}
+
+variables {
+  byte data_package[4095];  // Data to send
+  word data_length;        // Length of data package
+  byte fc_fs = 0;          // Flow Status
+  byte fc_bs = 2;          // Block Size
+  byte fc_stmin = 100;     // STmin (ms)
+  byte received_data[4095]; // Received data
+  word received_length;     // Length of received data
+  msTimer check_rx_timer;
+}
+
+/* Test sending data */
+on start {
+  word i;
+  cantp_init();
+  
+  // Test: Send 4 bytes (Single Frame)
+  data_length = 4;
+  for (i = 0; i < data_length; i++) {
+    data_package[i] = i + 1;  // 0x1, 0x2, 0x3, 0x4
+  }
+  write("ECU1 sending %d bytes", data_length);
+  cantp_send(data_package, data_length, 0x123);
+  
+  // Start timer to check reception
+  setTimer(check_rx_timer, 100);
+}
+
+/* Check for received data */
+on timer check_rx_timer {
+  word i;
+  if (!tp_state.active && !tp_state.sending) {
+    cantp_get_received_data(received_data, 4095, received_length);
+    if (received_length > 0) {
+      write("ECU1 received %d bytes:", received_length);
+      for (i = 0; i < received_length; i++) {
+        write("  Byte %d: 0x%02X", i, received_data[i]);
+      }
+    }
+  }
+  // Restart timer if still active
+  if (tp_state.active || tp_state.sending) {
+    setTimer(check_rx_timer, 100);
+  }
+}

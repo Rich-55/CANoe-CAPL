@@ -1,0 +1,12 @@
+﻿/*@!Encoding:65001*/
+variables
+{
+  message 0x1AA msgReceive;
+}
+
+on message 0x1AA
+{
+  int signal_1;
+  
+  write("Node2 Sent 0x2E4: Byte Sum ="
+}

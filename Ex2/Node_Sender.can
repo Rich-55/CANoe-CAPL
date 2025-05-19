@@ -1,0 +1,16 @@
+﻿/*@!Encoding:65001*/
+variables
+{
+  message msg1AA msgSend;
+}
+
+on sysvar TGT::signal_1_input
+{
+  msgSend.Signal_1 = @this;
+  output(msgSend);
+}
+
+on signal_update Signal_1
+{
+  output(msgSend);
+}

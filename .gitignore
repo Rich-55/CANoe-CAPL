@@ -1,0 +1,5 @@
+# Ignore folder
+CAN_500kBaud_1ch/
+
+# Ignore files with extentions
+*.cbf

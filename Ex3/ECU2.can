@@ -1,0 +1,49 @@
+﻿/*@!Encoding:65001*/
+/* ECU2 with CAN ID 0x456 */
+
+includes
+{
+  #include "CANTP.can"
+}
+
+variables {
+  byte data_package[4095];
+  word data_length;
+  byte fc_fs = 0;
+  byte fc_bs = 2;
+  byte fc_stmin = 100;
+  byte received_data[4095];
+  word received_length;
+  msTimer check_rx_timer;
+}
+
+on start {
+  word i;
+  cantp_init();
+  
+  // Test: Send 10 bytes (First Frame + Consecutive Frames)
+  data_length = 10;
+  for (i = 0; i < data_length; i++) {
+    data_package[i] = i + 1;  // 0x1, 0x2, ..., 0xA
+  }
+  write("ECU2 sending %d bytes", data_length);
+  cantp_send(data_package, data_length, 0x456);
+  
+  setTimer(check_rx_timer, 100);
+}
+
+on timer check_rx_timer {
+  word i;
+  if (!tp_state.active && !tp_state.sending) {
+    cantp_get_received_data(received_data, 4095, received_length);
+    if (received_length > 0) {
+      write("ECU2 received %d bytes:", received_length);
+      for (i = 0; i < received_length; i++) {
+        write("  Byte %d: 0x%02X", i, received_data[i]);
+      }
+    }
+  }
+  if (tp_state.active || tp_state.sending) {
+    setTimer(check_rx_timer, 100);
+  }
+}
