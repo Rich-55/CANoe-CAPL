@@ -1,0 +1,37 @@
+﻿/*@!Encoding:65001*/
+variables
+{
+  message 0x3B2 msgEngineSpeed;
+//  msTimer sendTimer; //timer
+}
+
+//on start
+//{
+//  setTimer(sendTimer, 100);
+//}
+
+//on timer sendTimer
+on key 'a'
+{
+  int i;
+  word engineSpeed;
+  engineSpeed= random(65535); // full 16-bit range (0–65535)
+  
+  for (i = 0; i < 8; i++)
+  {
+    msgEngineSpeed.byte(i) = 0;
+  }
+
+ msgEngineSpeed.byte(0) = (engineSpeed >> 12) & 0x0F;
+ msgEngineSpeed.byte(1) = (engineSpeed >> 4) & 0xFF;
+ msgEngineSpeed.byte(2) = (engineSpeed << 4) & 0xF0;
+  
+
+  
+  msgEngineSpeed.dlc = 3;
+  output(msgEngineSpeed);
+
+  write("Node1 sent 0x3B2: Engine Speed = %d", engineSpeed); //%u
+
+//  setTimer(sendTimer, 100);
+}

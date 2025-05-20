@@ -1,6 +1,4 @@
 ﻿/*@!Encoding:65001*/
-/* ECU2 with CAN ID 0x456 */
-
 includes
 {
   #include "CANTP.can"
@@ -8,42 +6,82 @@ includes
 
 variables {
   byte data_package[4095];
-  word data_length;
-  byte fc_fs = 0;
-  byte fc_bs = 2;
-  byte fc_stmin = 100;
+  int data_length;
   byte received_data[4095];
-  word received_length;
-  msTimer check_rx_timer;
+  int cf_received = 0;
 }
 
 on start {
-  word i;
-  cantp_init();
+  CanTp_SetTimeout(CANTP_COUNTER_AS, 1000);
+  CanTp_SetTimeout(CANTP_COUNTER_AR, 1000);
+  CanTp_SetTimeout(CANTP_COUNTER_BS, 1000);
+  CanTp_SetTimeout(CANTP_COUNTER_BR, 1000);
+  CanTp_SetTimeout(CANTP_COUNTER_CS, 1000);
+  CanTp_SetTimeout(CANTP_COUNTER_CR, 1000);
+  rx_can_id = 0x123;
   
   // Test: Send 10 bytes (First Frame + Consecutive Frames)
-  data_length = 10;
-  for (i = 0; i < data_length; i++) {
-    data_package[i] = i + 1;  // 0x1, 0x2, ..., 0xA
+  tx_length = 10;
+  for (i = 0; i < tx_length; i++) {
+    tx_data[i] = i + 1;
   }
-  write("ECU2 sending %d bytes", data_length);
-  cantp_send(data_package, data_length, 0x456);
-  
-  setTimer(check_rx_timer, 100);
+  write("ECU2 sending %d bytes", tx_length);
+  CanTp_Transmit(0x456, tx_data, tx_length);
 }
 
-on timer check_rx_timer {
-  word i;
-  if (!tp_state.active && !tp_state.sending) {
-    cantp_get_received_data(received_data, 4095, received_length);
-    if (received_length > 0) {
-      write("ECU2 received %d bytes:", received_length);
-      for (i = 0; i < received_length; i++) {
-        write("  Byte %d: 0x%02X", i, received_data[i]);
+on message 0x123 {
+  byte pci;
+  int frame_type, sn;
+  pci = this.byte(0);
+  frame_type = (pci & 0xF0) >> 4;
+
+  if (frame_type == 1) { /* FF */
+    rx_expected_length = ((pci & 0x0F) << 8) | this.byte(1);
+    rx_length = 0;
+    for (i = 0; i < 6; i++) {
+      rx_data[rx_length + i] = this.byte(i + 2);
+    }
+    rx_length = 6;
+    sequence_number = 0;
+    cf_received = 0;
+    write("ECU2 Received FF: Expected Length=%d", rx_expected_length);
+    SendFlowControl();
+  } else if (frame_type == 2) { /* CF */
+    sn = pci & 0x0F;
+    if (sn == (sequence_number + 1) % 16) {
+      sequence_number = sn;
+      for (i = 0; i < 7 && rx_length < rx_expected_length; i++) {
+        rx_data[rx_length] = this.byte(i + 1);
+        rx_length++;
       }
+      cf_received++;
+      write("ECU2 Received CF: SN=%d, Total Length=%d", sn, rx_length);
+      if (rx_length >= rx_expected_length) {
+        write("ECU2 Message Complete: Received %d bytes", rx_length);
+        CanTp_ReceiveIndication(this.id, rx_data, rx_length);
+        rx_length = 0;
+        rx_expected_length = 0;
+        sequence_number = 0;
+        cf_received = 0;
+      } else if (cf_received >= 2) {
+        SendFlowControl();
+        cf_received = 0;
+      }
+    } else {
+      write("ECU2 Invalid CF SN: Expected %d, Received %d", (sequence_number + 1) % 16, sn);
     }
   }
-  if (tp_state.active || tp_state.sending) {
-    setTimer(check_rx_timer, 100);
+}
+
+SendFlowControl() {
+  message 0x456 fc_msg;
+  fc_msg.dlc = 8;
+  fc_msg.byte(0) = 0x30;
+  fc_msg.byte(1) = 2;
+  fc_msg.byte(2) = 10;
+  for (i = 3; i < 8; i++) {
+    fc_msg.byte(i) = 0x55;
   }
+  output(fc_msg);
+  write("ECU2 Sent FC: FS=CTS, BS=2, STmin=10ms");
 }

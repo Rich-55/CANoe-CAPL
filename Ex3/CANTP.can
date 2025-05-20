@@ -2,279 +2,399 @@
 /* CAN-TP Library for ISO 15765-2 */
 
 variables {
-  /* Constants */
-  const int CAN_TP_SF = 0x00;        // Single Frame
-  const int CAN_TP_FF = 0x10;        // First Frame
-  const int CAN_TP_CF = 0x20;        // Consecutive Frame
-  const int CAN_TP_FC = 0x30;        // Flow Control
-  const int CAN_TP_MAX_DATA = 4095;  // Max CAN-TP data length
-  const int CAN_TP_MAX_PAYLOAD = 7;  // Max payload per CAN frame (SF/CF)
-  const int CANTP_COUNTER_AS = 1000; // AS timeout in ms
-  
-  /* Struct for CAN-TP state */
-  struct cantp_state {
-    byte data[CAN_TP_MAX_DATA];  // Data buffer
-    word length;                 // Total data length
-    word bytes_sent;             // Bytes sent/received
-    byte sn;                     // Sequence number for CF
-    byte bs_rem;                 // Remaining frames in block
-    byte bs_max;                 // Block size from FC
-    byte stmin;                  // STmin from FC (ms)
-    byte fs;                     // Flow Status
-    byte sending;                // 1 if sending, 0 if receiving
-    byte active;                 // 1 if TP session active
-    dword tx_id;                 // CAN message ID for the session
-  } tp_state;
-  
-  msTimer stmin_timer;  // Timer for STmin
-  msTimer as_timer;     // Timer for AS timeout
-  message 0x7DF msg;    // Default message ID
+  /* Counter Types */
+  int CANTP_COUNTER_AS = 0;
+  int CANTP_COUNTER_AR = 1;
+  int CANTP_COUNTER_BS = 2;
+  int CANTP_COUNTER_BR = 3;
+  int CANTP_COUNTER_CS = 4;
+  int CANTP_COUNTER_CR = 5;
+
+  /* Result Codes */
+  int CANTP_OK = 0;
+  int CANTP_E_N_AS_TIMEOUT = 1;
+  int CANTP_E_N_AR_TIMEOUT = 2;
+  int CANTP_E_N_BS_TIMEOUT = 3;
+  int CANTP_E_N_BR_TIMEOUT = 4;
+  int CANTP_E_N_CS_TIMEOUT = 5;
+  int CANTP_E_N_CR_TIMEOUT = 6;
+  int CANTP_E_INVALID_LENGTH = 7;
+  int CANTP_E_BUSY = 8;
+
+  /* Sender States */
+  int CANTP_SENDER_IDLE = 0;
+  int CANTP_SENDER_SEND_SF = 1;
+  int CANTP_SENDER_SEND_FF = 2;
+  int CANTP_SENDER_WAIT_FC = 3;
+  int CANTP_SENDER_SEND_CF = 4;
+
+  /* Receiver States */
+  int CANTP_RECEIVER_IDLE = 0;
+  int CANTP_RECEIVER_PREPARE_BUFFER = 1;
+  int CANTP_RECEIVER_SEND_FC = 2;
+  int CANTP_RECEIVER_RECEIVE_CF = 3;
+
+  /* Timers */
+  dword timer_values[6];
+  int timer_active[6];
+  dword timer_timeouts[6];
+  msTimer tick_timer;
+
+  /* State Variables */
+  int sender_state = 0;
+  int receiver_state = 0;
+  byte tx_data[4095];
+  byte rx_data[4095];
+  int tx_length = 0;
+  int rx_length = 0;
+  int rx_expected_length = 0;
+  int sequence_number = 0;
+  int block_size = 0;
+  int st_min = 0;
+  int cf_count = 0;
+  dword tx_can_id = 0;
+  dword rx_can_id = 0;
+  int last_error = 0;
+  int i;
 }
 
-/* Initialize CAN-TP state */
-void cantp_init() {
-  tp_state.length = 0;
-  tp_state.bytes_sent = 0;
-  tp_state.sn = 0;
-  tp_state.bs_rem = 0;
-  tp_state.bs_max = 0;
-  tp_state.stmin = 0;
-  tp_state.fs = 0;
-  tp_state.sending = 0;
-  tp_state.active = 0;
-  tp_state.tx_id = 0;
-  cancelTimer(stmin_timer);
-  cancelTimer(as_timer);
-}
-
-/* Start sending data */
-int cantp_send(byte data[], word len, dword tx_id) {
-  word i;
-  if (len == 0 || len > CAN_TP_MAX_DATA || tp_state.active) return -1;
-  
-  for (i = 0; i < len; i++) {
-    tp_state.data[i] = data[i];
+/* Initialize */
+on start {
+  for (i = 0; i < 6; i++) {
+    timer_timeouts[i] = 1000;
+    timer_values[i] = 0;
+    timer_active[i] = 0;
   }
-  tp_state.length = len;
-  tp_state.bytes_sent = 0;
-  tp_state.sn = 0;
-  tp_state.sending = 1;
-  tp_state.active = 1;
-  tp_state.tx_id = tx_id;
-  
-  if (len <= CAN_TP_MAX_PAYLOAD) {
-    cantp_send_sf(tx_id);
+  setTimer(tick_timer, 1);
+}
+
+/* Timer Tick */
+on timer tick_timer {
+  CanTp_Tick();
+  setTimer(tick_timer, 1);
+}
+
+/* Update Timers */
+CanTp_Tick() {
+  for (i = 0; i < 6; i++) {
+    if (timer_active[i] == 1 && timer_values[i] > 0) {
+      timer_values[i]--;
+      if (timer_values[i] == 0) {
+        timer_active[i] = 0;
+        CanTp_HandleTimeout(i);
+      }
+    }
+  }
+}
+
+/* Handle Timeout */
+CanTp_HandleTimeout(int counter) {
+  switch (counter) {
+    case 0: last_error = CANTP_E_N_AS_TIMEOUT; write("Timeout: N_As"); break;
+    case 1: last_error = CANTP_E_N_AR_TIMEOUT; write("Timeout: N_Ar"); break;
+    case 2: last_error = CANTP_E_N_BS_TIMEOUT; write("Timeout: N_Bs"); break;
+    case 3: last_error = CANTP_E_N_BR_TIMEOUT; write("Timeout: N_Br"); break;
+    case 4: last_error = CANTP_E_N_CS_TIMEOUT; write("Timeout: N_Cs"); break;
+    case 5: last_error = CANTP_E_N_CR_TIMEOUT; write("Timeout: N_Cr"); break;
+  }
+  CanTp_ResetToIdle();
+  CanTp_Timeout(counter);
+}
+
+/* Reset to IDLE */
+CanTp_ResetToIdle() {
+  sender_state = CANTP_SENDER_IDLE;
+  receiver_state = CANTP_RECEIVER_IDLE;
+  tx_length = 0;
+  rx_length = 0;
+  rx_expected_length = 0;
+  sequence_number = 0;
+  block_size = 0;
+  st_min = 0;
+  cf_count = 0;
+  for (i = 0; i < 6; i++) {
+    timer_active[i] = 0;
+    timer_values[i] = 0;
+  }
+}
+
+/* API: Set Timeout */
+int CanTp_SetTimeout(int counter, dword timeout_ms) {
+  if (counter < 0 || counter > 5) return CANTP_E_INVALID_LENGTH;
+  timer_timeouts[counter] = timeout_ms;
+  return CANTP_OK;
+}
+
+/* API: Get Counter Value */
+dword CanTp_GetCounter(int counter) {
+  if (counter < 0 || counter > 5) return 0;
+  return timer_values[counter];
+}
+
+/* API: Transmit Request */
+int CanTp_Transmit(dword can_id, byte data[], int length) {
+  if (sender_state != CANTP_SENDER_IDLE) return CANTP_E_BUSY;
+  if (length < 1 || length > 4095) return CANTP_E_INVALID_LENGTH;
+
+  tx_can_id = can_id;
+  tx_length = length;
+  for (i = 0; i < length; i++) {
+    tx_data[i] = data[i];
+  }
+
+  if (length <= 7) {
+    sender_state = CANTP_SENDER_SEND_SF;
+    CanTp_SendSingleFrame();
   } else {
-    cantp_send_ff(tx_id);
+    sender_state = CANTP_SENDER_SEND_FF;
+    CanTp_SendFirstFrame();
   }
-  return 0;
+  return CANTP_OK;
 }
 
 /* Send Single Frame */
-void cantp_send_sf(dword tx_id) {
-  word i;
-  
-  msg.id = tx_id;
-  msg.dlc = 8;
-  msg.byte(0) = CAN_TP_SF | (tp_state.length & 0x0F);
-  
-  for (i = 0; i < tp_state.length; i++) {
-    msg.byte(i + 1) = tp_state.data[i];
+CanTp_SendSingleFrame() {
+  message 0x0 tx_msg;
+  tx_msg.id = tx_can_id;
+  tx_msg.dlc = 8;
+  tx_msg.byte(0) = 0x00 | (tx_length & 0x0F);
+  for (i = 0; i < tx_length; i++) {
+    tx_msg.byte(i + 1) = tx_data[i];
   }
-  for (i = tp_state.length + 1; i < 8; i++) {
-    msg.byte(i) = 0x55;
+  for (i = tx_length + 1; i < 8; i++) {
+    tx_msg.byte(i) = 0x55;
   }
-  
-  setTimer(as_timer, CANTP_COUNTER_AS);
-  output(msg);
-  tp_state.active = 0;
+  timer_values[CANTP_COUNTER_AS] = timer_timeouts[CANTP_COUNTER_AS];
+  timer_active[CANTP_COUNTER_AS] = 1;
+  output(tx_msg);
 }
 
 /* Send First Frame */
-void cantp_send_ff(dword tx_id) {
-  word i;
-  
-  msg.id = tx_id;
-  msg.dlc = 8;
-  msg.byte(0) = CAN_TP_FF | ((tp_state.length >> 8) & 0x0F);
-  msg.byte(1) = tp_state.length & 0xFF;
-  
+CanTp_SendFirstFrame() {
+  message 0x0 tx_msg;
+  tx_msg.id = tx_can_id;
+  tx_msg.dlc = 8;
+  tx_msg.byte(0) = 0x10 | ((tx_length >> 8) & 0x0F);
+  tx_msg.byte(1) = tx_length & 0xFF;
   for (i = 0; i < 6; i++) {
-    msg.byte(i + 2) = tp_state.data[i];
+    tx_msg.byte(i + 2) = tx_data[i];
   }
-  
-  tp_state.bytes_sent = 6;
-  setTimer(as_timer, CANTP_COUNTER_AS);
-  output(msg);
+  timer_values[CANTP_COUNTER_AS] = timer_timeouts[CANTP_COUNTER_AS];
+  timer_active[CANTP_COUNTER_AS] = 1;
+  output(tx_msg);
 }
 
 /* Send Consecutive Frame */
-void cantp_send_cf(dword tx_id) {
-  word i;
-  word remaining;
-  word payload;
-  
-  remaining = tp_state.length - tp_state.bytes_sent;
-  payload = (remaining > CAN_TP_MAX_PAYLOAD) ? CAN_TP_MAX_PAYLOAD : remaining;
-  
-  msg.id = tx_id;
-  msg.dlc = 8;
-  msg.byte(0) = CAN_TP_CF | (tp_state.sn & 0x0F);
-  
-  for (i = 0; i < payload; i++) {
-    msg.byte(i + 1) = tp_state.data[tp_state.bytes_sent + i];
+CanTp_SendConsecutiveFrame() {
+  message 0x0 tx_msg;
+  int offset;
+  tx_msg.id = tx_can_id;
+  tx_msg.dlc = 8;
+  sequence_number = (sequence_number + 1) % 16;
+  tx_msg.byte(0) = 0x20 | sequence_number;
+  offset = cf_count * 7;
+  for (i = 0; i < 7 && offset + i < tx_length; i++) {
+    tx_msg.byte(i + 1) = tx_data[offset + i];
   }
-  for (i = payload; i < 7; i++) {
-    msg.byte(i + 1) = 0x55;
+  for (; i < 7; i++) {
+    tx_msg.byte(i + 1) = 0x55;
   }
-  
-  tp_state.bytes_sent += payload;
-  tp_state.sn = (tp_state.sn + 1) & 0x0F;
-  tp_state.bs_rem--;
-  output(msg);
-  
-  if (tp_state.bytes_sent >= tp_state.length) {
-    tp_state.active = 0;
-  }
+  timer_values[CANTP_COUNTER_CS] = timer_timeouts[CANTP_COUNTER_CS];
+  timer_active[CANTP_COUNTER_CS] = 1;
+  output(tx_msg);
 }
 
-/* Send Flow Control Frame */
-void cantp_send_fc(dword tx_id, byte fs, byte bs, byte stmin) {
-  word i;
+/* Send Flow Control */
+CanTp_SendFlowControl(dword canId, int fcType, int bsValue, int stminValue) {
+  message 0x0 tx_msg;
+  int finalFcType;
+  int finalBs;
+  int finalStmin;
+  finalFcType = fcType;
+  finalBs = bsValue;
+  finalStmin = stminValue;
   
-  msg.id = tx_id;
-  msg.dlc = 8;
-  msg.byte(0) = CAN_TP_FC | (fs & 0x0F);
-  msg.byte(1) = bs;
-  msg.byte(2) = stmin;
+  tx_msg.id = canId;
+  tx_msg.dlc = 8;
+  
+  if (finalFcType < 0 || finalFcType > 2) finalFcType = 0;
+  if (finalBs < 0 || finalBs > 255) finalBs = 0;
+  if (finalStmin < 0 || (finalStmin > 127 && finalStmin < 0xF1) || finalStmin > 0xF9) finalStmin = 10;
+  
+  tx_msg.byte(0) = 0x30 | (finalFcType & 0x0F);
+  tx_msg.byte(1) = finalBs;
+  tx_msg.byte(2) = finalStmin;
   for (i = 3; i < 8; i++) {
-    msg.byte(i) = 0x55;
+    tx_msg.byte(i) = 0x55;
   }
-  output(msg);
-}
-
-/* Handle received CAN-TP frame */
-on message CAN1.* {
-  byte pci;
-  pci = this.byte(0) & 0xF0;
-  if (tp_state.active || pci == CAN_TP_SF || pci == CAN_TP_FF) {
-    if (pci == CAN_TP_SF) {
-      cantp_handle_sf(this);
-    } else if (pci == CAN_TP_FF) {
-      cantp_handle_ff(this, this.id);
-    } else if (pci == CAN_TP_CF) {
-      cantp_handle_cf(this);
-    } else if (pci == CAN_TP_FC && tp_state.sending) {
-      cantp_handle_fc(this, this.id);
-    }
-  }
+  
+  timer_values[CANTP_COUNTER_AR] = timer_timeouts[CANTP_COUNTER_AR];
+  timer_active[CANTP_COUNTER_AR] = 1;
+  output(tx_msg);
+  
+  receiver_state = (finalFcType == 0) ? CANTP_RECEIVER_RECEIVE_CF : CANTP_RECEIVER_IDLE;
 }
 
 /* Handle Single Frame */
-void cantp_handle_sf(message CAN1.* msg) {
-  word i;
-  byte len;
-  
-  len = msg.byte(0) & 0x0F;
-  if (len > CAN_TP_MAX_PAYLOAD) return;
-  
-  tp_state.length = len;
-  for (i = 0; i < len; i++) {
-    tp_state.data[i] = msg.byte(i + 1);
-  }
-  tp_state.active = 0;
-}
-
-/* Handle First Frame */
-void cantp_handle_ff(message CAN1.* msg, dword tx_id) {
-  word i;
-  word len;
-  
-  len = ((msg.byte(0) & 0x0F) << 8) | msg.byte(1);
-  if (len > CAN_TP_MAX_DATA) {
-    cantp_send_fc(tx_id, 2, 0, 0);
+CanTp_HandleSingleFrame(dword canId, byte payload[]) {
+  int length;
+  timer_values[CANTP_COUNTER_AR] = timer_timeouts[CANTP_COUNTER_AR];
+  timer_active[CANTP_COUNTER_AR] = 1;
+  length = payload[0] & 0x0F;
+  if (length > 7) {
+    last_error = CANTP_E_INVALID_LENGTH;
+    CanTp_ResetToIdle();
     return;
   }
   
-  tp_state.length = len;
-  tp_state.bytes_sent = 0;
-  tp_state.sn = 0;
-  tp_state.sending = 0;
-  tp_state.active = 1;
-  tp_state.tx_id = tx_id;
-  
-  for (i = 0; i < 6; i++) {
-    tp_state.data[i] = msg.byte(i + 2);
+  for (i = 0; i < length; i++) {
+    rx_data[i] = payload[i + 1];
   }
-  tp_state.bytes_sent = 6;
+  rx_length = length;
+  CanTp_ReceiveIndication(canId, rx_data, rx_length);
+  timer_active[CANTP_COUNTER_AR] = 0;
+  timer_values[CANTP_COUNTER_AR] = 0;
+}
+
+/* Handle First Frame */
+CanTp_HandleFirstFrame(dword canId, byte payload[]) {
+  if (receiver_state != CANTP_RECEIVER_IDLE) return;
+  timer_values[CANTP_COUNTER_BR] = timer_timeouts[CANTP_COUNTER_BR];
+  timer_active[CANTP_COUNTER_BR] = 1;
+  rx_expected_length = ((payload[0] & 0x0F) << 8) | payload[1];
+  if (rx_expected_length > 4095) {
+    CanTp_SendFlowControl(canId, 2, 0, 0);
+    return;
+  }
+  receiver_state = CANTP_RECEIVER_PREPARE_BUFFER;
+  for (i = 0; i < 6; i++) {
+    rx_data[i] = payload[i + 2];
+  }
+  rx_length = 6;
+  sequence_number = 0;
+  timer_active[CANTP_COUNTER_BR] = 0;
+  timer_values[CANTP_COUNTER_BR] = 0;
+  receiver_state = CANTP_RECEIVER_SEND_FC;
+  CanTp_SendFlowControl(canId, 0, 0, 10);
 }
 
 /* Handle Consecutive Frame */
-void cantp_handle_cf(message CAN1.* msg) {
-  word i;
-  word remaining;
-  word payload;
-  byte sn;
-  
-  remaining = tp_state.length - tp_state.bytes_sent;
-  payload = (remaining > CAN_TP_MAX_PAYLOAD) ? CAN_TP_MAX_PAYLOAD : remaining;
-  sn = msg.byte(0) & 0x0F;
-  
-  if (sn != tp_state.sn) return;
-  for (i = 0; i < payload; i++) {
-    tp_state.data[tp_state.bytes_sent + i] = msg.byte(i + 1);
+CanTp_HandleConsecutiveFrame(dword canId, byte payload[]) {
+  int sn;
+  int j;
+  if (receiver_state != CANTP_RECEIVER_RECEIVE_CF) return;
+  timer_active[CANTP_COUNTER_CR] = 0;
+  timer_values[CANTP_COUNTER_CR] = 0;
+  sn = payload[0] & 0x0F;
+  if (sn != (sequence_number + 1) % 16) return;
+  sequence_number = sn;
+  for (j = 0; j < 7 && rx_length < rx_expected_length; j++) {
+    rx_data[rx_length] = payload[j + 1];
+    rx_length++;
   }
-  
-  tp_state.bytes_sent += payload;
-  tp_state.sn = (tp_state.sn + 1) & 0x0F;
-  if (tp_state.bytes_sent >= tp_state.length) {
-    tp_state.active = 0;
-  }
-}
-
-/* Handle Flow Control Frame */
-void cantp_handle_fc(message CAN1.* msg, dword tx_id) {
-  byte fs;
-  
-  fs = msg.byte(0) & 0x0F;
-  tp_state.fs = fs;
-  tp_state.bs_max = msg.byte(1);
-  tp_state.stmin = msg.byte(2);
-  tp_state.bs_rem = tp_state.bs_max;
-  
-  if (fs == 0 && tp_state.active) {
-    setTimer(stmin_timer, tp_state.stmin);
-  } else if (fs == 2) {
-    tp_state.active = 0;
+  if (rx_length >= rx_expected_length) {
+    receiver_state = CANTP_RECEIVER_IDLE;
+    CanTp_ReceiveIndication(canId, rx_data, rx_length);
+  } else {
+    timer_values[CANTP_COUNTER_CR] = timer_timeouts[CANTP_COUNTER_CR];
+    timer_active[CANTP_COUNTER_CR] = 1;
   }
 }
 
-/* Timer callback for STmin */
-on timer stmin_timer {
-  if (tp_state.active && tp_state.sending && tp_state.fs == 0) {
-    cantp_send_cf(tp_state.tx_id);
-    if (tp_state.bs_rem == 0 && tp_state.bytes_sent < tp_state.length) {
-      tp_state.fs = 1;
-    } else if (tp_state.active) {
-      setTimer(stmin_timer, tp_state.stmin);
+/* Handle Flow Control */
+CanTp_HandleFlowControl(dword canId, byte payload[]) {
+  int fcType;
+  if (sender_state != CANTP_SENDER_WAIT_FC) return;
+  timer_active[CANTP_COUNTER_BS] = 0;
+  timer_values[CANTP_COUNTER_BS] = 0;
+  fcType = payload[0] & 0x0F;
+  block_size = payload[1];
+  st_min = payload[2];
+  CanTp_FlowControlIndication(canId, fcType, block_size, st_min);
+  switch (fcType) {
+    case 0:
+      sender_state = CANTP_SENDER_SEND_CF;
+      cf_count = 0;
+      CanTp_SendConsecutiveFrame();
+      break;
+    case 1:
+      timer_values[CANTP_COUNTER_BS] = timer_timeouts[CANTP_COUNTER_BS];
+      timer_active[CANTP_COUNTER_BS] = 1;
+      break;
+    case 2:
+      CanTp_ResetToIdle();
+      break;
+  }
+}
+
+/* Callbacks */
+CanTp_TransmitConfirmation(dword can_id, int result) {
+  write("Tx Confirmation: CAN ID=0x%x, Result=%d", can_id, result);
+  if (sender_state == CANTP_SENDER_SEND_SF) {
+    CanTp_ResetToIdle();
+  } else if (sender_state == CANTP_SENDER_SEND_FF) {
+    sender_state = CANTP_SENDER_WAIT_FC;
+    timer_values[CANTP_COUNTER_BS] = timer_timeouts[CANTP_COUNTER_BS];
+    timer_active[CANTP_COUNTER_BS] = 1;
+  } else if (sender_state == CANTP_SENDER_SEND_CF) {
+    cf_count++;
+    timer_values[CANTP_COUNTER_CS] = st_min;
+    timer_active[CANTP_COUNTER_CS] = 1;
+    if (cf_count * 7 >= tx_length) {
+      CanTp_ResetToIdle();
+    } else if (block_size > 0 && cf_count >= block_size) {
+      sender_state = CANTP_SENDER_WAIT_FC;
+      timer_values[CANTP_COUNTER_BS] = timer_timeouts[CANTP_COUNTER_BS];
+      timer_active[CANTP_COUNTER_BS] = 1;
+    } else {
+      CanTp_SendConsecutiveFrame();
     }
   }
 }
 
-/* Timer callback for AS timeout */
-on timer as_timer {
-  if (tp_state.active && tp_state.sending) {
-    write("AS timeout occurred");
-    tp_state.active = 0;
-  }
+CanTp_ReceiveIndication(dword can_id, byte data[], int length) {
+  write("Rx Indication: CAN ID=0x%x, Length=%d", can_id, length);
 }
 
-/* Get received data */
+CanTp_FlowControlIndication(dword can_id, int fc_type, int bs, int stmin) {
+  write("FC Indication: CAN ID=0x%x, Type=%d, BS=%d, STmin=%d", can_id, fc_type, bs, stmin);
+}
+
+CanTp_Timeout(int counter) {
+  write("Timeout: Counter=%d", counter);
+}
+
+/* Get Received Data (Compatibility) */
 void cantp_get_received_data(byte dest[], word maxLen, word &outLen) {
-  word i;
-  
-  outLen = (tp_state.length < maxLen) ? tp_state.length : maxLen;
-  for (i = 0; i < outLen; i++) {
-    dest[i] = tp_state.data[i];
+  for (i = 0; i < rx_length && i < maxLen; i++) {
+    dest[i] = rx_data[i];
+  }
+  outLen = (rx_length < maxLen) ? rx_length : maxLen;
+}
+
+/* Message Handler */
+on message * {
+  if (this.dir == RX && (this.id == rx_can_id || rx_can_id == 0)) {
+    byte pci;
+    int frame_type;
+    byte payload[8];
+    pci = this.byte(0);
+    frame_type = (pci & 0xF0) >> 4;
+    for (i = 0; i < 8; i++) {
+      payload[i] = this.byte(i);
+    }
+    switch (frame_type) {
+      case 0: CanTp_HandleSingleFrame(this.id, payload); break;
+      case 1: CanTp_HandleFirstFrame(this.id, payload); break;
+      case 2: CanTp_HandleConsecutiveFrame(this.id, payload); break;
+      case 3: CanTp_HandleFlowControl(this.id, payload); break;
+    }
+  }
+  if (this.dir == TX && this.id == tx_can_id) {
+    timer_active[CANTP_COUNTER_AS] = 0;
+    timer_values[CANTP_COUNTER_AS] = 0;
+    timer_active[CANTP_COUNTER_CS] = 0;
+    timer_values[CANTP_COUNTER_CS] = 0;
+    CanTp_TransmitConfirmation(this.id, CANTP_OK);
   }
 }
