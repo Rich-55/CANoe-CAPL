@@ -1,0 +1,196 @@
+﻿/*@!Encoding:65001*/
+
+variables
+{
+  const byte SF = 0x00;
+  const byte FF = 0x10;
+  const byte CF = 0x20;
+  const byte FC = 0x30;
+
+  byte STmin;
+  byte FS;
+  byte BS;
+
+  byte rxBuffer[4096];
+  dword rxBufferIndex;
+  dword expectedLength;
+}
+
+initCANTP(dword txID, dword rxID)
+{
+  rxBufferIndex = 0;
+  expectedLength = 0;
+  STmin = 0;
+  FS = 0;
+  BS = 8;
+}
+
+byte getFrameType(byte firstByte)
+{
+  return (firstByte & 0xF0);
+}
+
+byte processSingleFrame(byte data[], dword len)
+{
+  dword i;
+  if (len > 8 || (data[0] & 0x0F) > 7) return 0;
+  for (i = 0; i < (data[0] & 0x0F); i++)
+  {
+    rxBuffer[rxBufferIndex++] = data[i + 1];
+  }
+  return 1;
+}
+
+byte processFirstFrame(byte data[], dword len)
+{
+  dword i;
+  if (len < 2) return 0;
+  expectedLength = ((data[0] & 0x0F) << 8) | data[1];
+  if (expectedLength > 4095) return 0;
+  rxBufferIndex = 0;
+  for (i = 2; i < len; i++)
+  {
+    rxBuffer[rxBufferIndex++] = data[i];
+  }
+  return 1;
+}
+
+byte processConsecutiveFrame(byte data[], dword len)
+{
+  dword i;
+  byte seqNum;
+  seqNum = data[0] & 0x0F;
+  for (i = 1; i < len && rxBufferIndex < expectedLength; i++)
+  {
+    rxBuffer[rxBufferIndex++] = data[i];
+  }
+  return (rxBufferIndex >= expectedLength);
+}
+
+void sendFlowControl(message *msg, byte flowStatus, byte blockSize, byte stMin)
+{
+  byte fcFrame[8];
+  dword i;
+  dword rxID;
+  rxID = msg.id;
+  fcFrame[0] = FC | 0x00;
+  fcFrame[1] = blockSize;
+  fcFrame[2] = stMin;
+  msg.id = rxID;
+  msg.dlc = 8;
+  for (i = 0; i < 8; i++)
+  {
+    msg.Byte(i) = fcFrame[i];
+  }
+  output(msg);
+}
+
+void sendSingleFrame(message *msg, byte data[], dword len)
+{
+  byte frame[8];
+  dword i;
+  dword txID;
+  txID = msg.id;
+  frame[0] = SF | (len & 0x0F);
+  for (i = 0; i < len; i++)
+  {
+    frame[i + 1] = data[i];
+  }
+  msg.id = txID;
+  msg.dlc = 8;
+  for (i = 0; i < 8; i++)
+  {
+    msg.Byte(i) = frame[i];
+  }
+  output(msg);
+}
+
+void sendFirstFrame(message *msg, byte data[], dword len)
+{
+  byte frame[8];
+  dword i;
+  dword txID;
+  txID = msg.id;
+  frame[0] = FF | ((len >> 8) & 0x0F);
+  frame[1] = len & 0xFF;
+  for (i = 0; i < 6; i++)
+  {
+    frame[i + 2] = data[i];
+  }
+  msg.id = txID;
+  msg.dlc = 8;
+  for (i = 0; i < 8; i++)
+  {
+    msg.Byte(i) = frame[i];
+  }
+  output(msg);
+}
+
+void sendConsecutiveFrame(message *msg, byte data[], dword len, byte seqNum, dword offset)
+{
+  byte frame[8];
+  dword i;
+  dword txID;
+  txID = msg.id;
+  frame[0] = CF | (seqNum & 0x0F);
+  for (i = 0; i < 7 && (offset + i) < len; i++)
+  {
+    frame[i + 1] = data[offset + i];
+  }
+  msg.id = txID;
+  msg.dlc = 8;
+  for (i = 0; i < 8; i++)
+  {
+    msg.Byte(i) = frame[i];
+  }
+  output(msg);
+}
+
+void sendData(message *msg, byte data[], dword len)
+{
+  if (len <= 7)
+  {
+    sendSingleFrame(msg, data, len);
+  }
+  else
+  {
+    sendFirstFrame(msg, data, len);
+  }
+}
+
+void processFrame(message *msg, byte data[], dword len)
+{
+  byte frameType;
+  frameType = getFrameType(data[0]);
+  if (frameType == SF)
+  {
+    if (processSingleFrame(data, len))
+    {
+      write("Received Single Frame: %d bytes", rxBufferIndex);
+    }
+  }
+  else if (frameType == FF)
+  {
+    if (processFirstFrame(data, len))
+    {
+      sendFlowControl(msg, 0, BS, STmin);
+    }
+  }
+  else if (frameType == CF)
+  {
+    if (processConsecutiveFrame(data, len))
+    {
+      write("Received complete message: %d bytes", rxBufferIndex);
+    }
+    else
+    {
+      sendFlowControl(msg, 0, BS, STmin);
+    }
+  }
+  else if (frameType == FC)
+  {
+    FS = data[0] & 0x0F;
+    BS = data[1];
+    STmin = data[2];
+  }
+}

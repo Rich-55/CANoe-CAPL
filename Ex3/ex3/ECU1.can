@@ -1,0 +1,36 @@
+/*@!Encoding:1258*/
+includes
+{
+  #include "CANTP.can"
+}
+
+variables
+{
+  message 0x123 txMsg;
+  message 0x456 rxMsg;
+  byte data[4096];
+  dword dataLength;
+}
+
+on start
+{
+  dword i;
+  initCANTP(0x123, 0x456);
+  dataLength = 10;
+  for (i = 0; i < dataLength; i++)
+  {
+    data[i] = i + 1;
+  }
+  sendData(txMsg, data, dataLength);
+}
+
+on message 0x456
+{
+  byte msgData[8];
+  dword i;
+  for (i = 0; i < this.dlc; i++)
+  {
+    msgData[i] = this.Byte(i);
+  }
+  processFrame(this, msgData, this.dlc);
+}
